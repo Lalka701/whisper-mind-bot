@@ -36,6 +36,7 @@ DB_PATH = "history.db"
 GEMINI_MODEL = "gemini-3.5-flash"
 WHISPER_MODEL = "whisper-large-v3-turbo"
 TTS_VOICE = "ru-RU-DmitryNeural"
+VOICE_TRIGGERS = {"голос", "гс", "озвучь", "озвучить"}
 
 gemini_client = genai.Client(api_key=GEMINI_API_KEY)
 groq_client = AsyncGroq(api_key=GROQ_API_KEY)
@@ -83,6 +84,19 @@ def clear_history(user_id: int):
     with sqlite3.connect(DB_PATH) as conn:
         conn.execute("DELETE FROM messages WHERE user_id = ?", (user_id,))
         conn.commit()
+
+
+def get_last_assistant_message(user_id: int) -> str | None:
+    with sqlite3.connect(DB_PATH) as conn:
+        cursor = conn.execute(
+            """SELECT content FROM messages
+               WHERE user_id = ? AND role = 'model'
+               ORDER BY timestamp DESC
+               LIMIT 1""",
+            (user_id,),
+        )
+        row = cursor.fetchone()
+    return row[0] if row else None
 
 
 # --- Helpers ---
@@ -175,6 +189,21 @@ async def clear_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     user_message = update.message.text
+
+    if user_message.strip().lower() in VOICE_TRIGGERS:
+        last_reply = get_last_assistant_message(user_id)
+        if not last_reply:
+            await update.message.reply_text("Пока нечего озвучивать — задай вопрос сначала.")
+            return
+        await context.bot.send_chat_action(
+            chat_id=update.effective_chat.id, action="record_voice"
+        )
+        try:
+            await send_voice_reply(update, last_reply)
+        except Exception as e:
+            logger.error("TTS error: %s", e)
+            await update.message.reply_text("Не удалось озвучить.")
+        return
 
     await context.bot.send_chat_action(chat_id=update.effective_chat.id, action="typing")
 
