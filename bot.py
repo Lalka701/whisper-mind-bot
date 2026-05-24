@@ -35,7 +35,7 @@ MAX_HISTORY = 20
 DB_PATH = "history.db"
 GEMINI_MODEL = "gemini-3.5-flash"
 WHISPER_MODEL = "whisper-large-v3-turbo"
-TTS_VOICE = "ru-RU-SvetlanaNeural"
+TTS_VOICE = "ru-RU-DmitryNeural"
 
 gemini_client = genai.Client(api_key=GEMINI_API_KEY)
 groq_client = AsyncGroq(api_key=GROQ_API_KEY)
