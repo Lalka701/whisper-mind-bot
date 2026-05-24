@@ -15,6 +15,7 @@ from telegram.ext import (
 from google import genai
 from google.genai import types as genai_types
 from groq import AsyncGroq
+import edge_tts
 
 load_dotenv()
 
@@ -34,6 +35,7 @@ MAX_HISTORY = 20
 DB_PATH = "history.db"
 GEMINI_MODEL = "gemini-3.5-flash"
 WHISPER_MODEL = "whisper-large-v3-turbo"
+TTS_VOICE = "ru-RU-SvetlanaNeural"
 
 gemini_client = genai.Client(api_key=GEMINI_API_KEY)
 groq_client = AsyncGroq(api_key=GROQ_API_KEY)
@@ -120,6 +122,26 @@ async def transcribe_voice(file_id: str, context: ContextTypes.DEFAULT_TYPE) -> 
             os.unlink(tmp_path)
 
 
+async def text_to_voice(text: str) -> str:
+    """Generate MP3 from text via edge-tts. Returns path to temp file."""
+    with tempfile.NamedTemporaryFile(suffix=".mp3", delete=False) as tmp:
+        tmp_path = tmp.name
+    communicate = edge_tts.Communicate(text, TTS_VOICE)
+    await communicate.save(tmp_path)
+    return tmp_path
+
+
+async def send_voice_reply(update: Update, text: str):
+    """Send text as a Telegram voice message via edge-tts."""
+    voice_path = await text_to_voice(text)
+    try:
+        with open(voice_path, "rb") as voice_file:
+            await update.message.reply_voice(voice=voice_file)
+    finally:
+        if os.path.exists(voice_path):
+            os.unlink(voice_path)
+
+
 async def reply_long(update: Update, text: str):
     """Send text, splitting into chunks if it exceeds Telegram's 4096-char limit."""
     max_len = 4096
@@ -189,6 +211,14 @@ async def handle_voice(update: Update, context: ContextTypes.DEFAULT_TYPE):
             reply = "Пустой ответ от модели. Попробуй переформулировать."
         save_message(user_id, "model", reply)
         await reply_long(update, reply)
+
+        try:
+            await context.bot.send_chat_action(
+                chat_id=update.effective_chat.id, action="record_voice"
+            )
+            await send_voice_reply(update, reply)
+        except Exception as e:
+            logger.error("TTS error: %s", e)
 
     except Exception as e:
         logger.error("handle_voice error: %s", e)
