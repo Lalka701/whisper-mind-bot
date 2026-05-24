@@ -37,6 +37,15 @@ WHISPER_MODEL = "whisper-large-v3-turbo"
 TTS_VOICE = "ru-RU-DmitryNeural"
 VOICE_TRIGGERS = {"голос", "гс", "озвучь", "озвучить"}
 
+SYSTEM_PROMPT = (
+    "Ты — личный ассистент пользователя в Telegram. "
+    "Отвечай раскованно и по-человечески, как друг в переписке. "
+    "Используй мат, сленг и крепкие выражения когда это уместно — не строй из себя интеллигента. "
+    "Не читай мораль, не извиняйся за резкие формулировки, не предупреждай о чувствительности темы. "
+    "Будь кратким, не лей воду, не используй абзацы и списки без необходимости — пиши как в обычном чате. "
+    "Если пользователь шутит — шути в ответ, если задаёт вопрос — отвечай по делу."
+)
+
 groq_client = AsyncGroq(api_key=GROQ_API_KEY)
 
 
@@ -104,7 +113,7 @@ def get_last_assistant_message(user_id: int) -> str | None:
 # --- Helpers ---
 
 async def ask_llm(user_id: int) -> str:
-    messages = get_history(user_id)
+    messages = [{"role": "system", "content": SYSTEM_PROMPT}] + get_history(user_id)
     response = await groq_client.chat.completions.create(
         model=CHAT_MODEL,
         messages=messages,
@@ -114,7 +123,7 @@ async def ask_llm(user_id: int) -> str:
 
 async def ask_llm_vision(user_id: int, image_b64: str, caption: str) -> str:
     """Send chat history + new image+caption to a vision model. Saves result to history."""
-    messages = get_history(user_id)
+    messages = [{"role": "system", "content": SYSTEM_PROMPT}] + get_history(user_id)
     messages.append({
         "role": "user",
         "content": [
