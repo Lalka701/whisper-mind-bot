@@ -1,3 +1,4 @@
+import base64
 import os
 import logging
 import sqlite3
@@ -31,6 +32,7 @@ PORT = int(os.environ.get("PORT", 8000))
 MAX_HISTORY = 20
 DB_PATH = "history.db"
 CHAT_MODEL = "llama-3.3-70b-versatile"
+VISION_MODEL = "meta-llama/llama-4-scout-17b-16e-instruct"
 WHISPER_MODEL = "whisper-large-v3-turbo"
 TTS_VOICE = "ru-RU-DmitryNeural"
 VOICE_TRIGGERS = {"голос", "гс", "озвучь", "озвучить"}
@@ -110,6 +112,23 @@ async def ask_llm(user_id: int) -> str:
     return response.choices[0].message.content or ""
 
 
+async def ask_llm_vision(user_id: int, image_b64: str, caption: str) -> str:
+    """Send chat history + new image+caption to a vision model. Saves result to history."""
+    messages = get_history(user_id)
+    messages.append({
+        "role": "user",
+        "content": [
+            {"type": "text", "text": caption},
+            {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{image_b64}"}},
+        ],
+    })
+    response = await groq_client.chat.completions.create(
+        model=VISION_MODEL,
+        messages=messages,
+    )
+    return response.choices[0].message.content or ""
+
+
 async def transcribe_voice(file_id: str, context: ContextTypes.DEFAULT_TYPE) -> str:
     voice_file = await context.bot.get_file(file_id)
 
@@ -167,9 +186,12 @@ async def reply_long(update: Update, text: str):
 
 async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
-        "Привет! Я ИИ-ассистент на базе Llama 3.3 70B (Groq).\n\n"
-        "Напиши мне что-нибудь или отправь голосовое сообщение.\n"
-        "Триггер «голос» или «гс» — озвучу предыдущий ответ.\n\n"
+        "Привет! Я ИИ-ассистент на базе Llama (Groq).\n\n"
+        "Что я умею:\n"
+        "• Отвечать на текст\n"
+        "• Распознавать голосовые сообщения\n"
+        "• Смотреть фото (с подписью или без)\n"
+        "• Озвучивать ответы — напиши «голос» или «гс»\n\n"
         "/start — это сообщение\n"
         "/clear — очистить историю диалога"
     )
@@ -211,6 +233,39 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     except Exception as e:
         logger.error("handle_text error: %s", e)
         await update.message.reply_text("Произошла ошибка. Попробуйте снова.")
+
+
+async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+    caption = (update.message.caption or "Что на этой картинке?").strip()
+
+    await context.bot.send_chat_action(chat_id=update.effective_chat.id, action="typing")
+
+    try:
+        photo = update.message.photo[-1]
+        photo_file = await context.bot.get_file(photo.file_id)
+
+        with tempfile.NamedTemporaryFile(suffix=".jpg", delete=False) as tmp:
+            tmp_path = tmp.name
+
+        try:
+            await photo_file.download_to_drive(tmp_path)
+            with open(tmp_path, "rb") as f:
+                image_b64 = base64.b64encode(f.read()).decode("utf-8")
+        finally:
+            if os.path.exists(tmp_path):
+                os.unlink(tmp_path)
+
+        reply = await ask_llm_vision(user_id, image_b64, caption)
+        if not reply.strip():
+            reply = "Не удалось распознать изображение."
+
+        save_message(user_id, "user", f"[Фото] {caption}")
+        save_message(user_id, "assistant", reply)
+        await reply_long(update, reply)
+    except Exception as e:
+        logger.error("handle_photo error: %s", e)
+        await update.message.reply_text("Ошибка при обработке изображения.")
 
 
 async def handle_voice(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -258,6 +313,7 @@ def main():
     app.add_handler(CommandHandler("clear", clear_command))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
     app.add_handler(MessageHandler(filters.VOICE, handle_voice))
+    app.add_handler(MessageHandler(filters.PHOTO, handle_photo))
 
     if WEBHOOK_URL:
         logger.info("Webhook mode: %s", WEBHOOK_URL)
