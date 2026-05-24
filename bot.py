@@ -12,8 +12,6 @@ from telegram.ext import (
     filters,
     ContextTypes,
 )
-from google import genai
-from google.genai import types as genai_types
 from groq import AsyncGroq
 import edge_tts
 
@@ -26,19 +24,17 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 TELEGRAM_BOT_TOKEN = os.environ["TELEGRAM_BOT_TOKEN"]
-GEMINI_API_KEY = os.environ["GEMINI_API_KEY"]
 GROQ_API_KEY = os.environ["GROQ_API_KEY"]
 WEBHOOK_URL = os.environ.get("WEBHOOK_URL", "")
 PORT = int(os.environ.get("PORT", 8000))
 
 MAX_HISTORY = 20
 DB_PATH = "history.db"
-GEMINI_MODEL = "gemini-3.5-flash"
+CHAT_MODEL = "llama-3.3-70b-versatile"
 WHISPER_MODEL = "whisper-large-v3-turbo"
 TTS_VOICE = "ru-RU-DmitryNeural"
 VOICE_TRIGGERS = {"голос", "гс", "озвучь", "озвучить"}
 
-gemini_client = genai.Client(api_key=GEMINI_API_KEY)
 groq_client = AsyncGroq(api_key=GROQ_API_KEY)
 
 
@@ -77,7 +73,11 @@ def get_history(user_id: int) -> list[dict]:
             (user_id, MAX_HISTORY),
         )
         rows = cursor.fetchall()
-    return [{"role": r[0], "content": r[1]} for r in reversed(rows)]
+    # Legacy rows from the Gemini era used role="model"; normalize to "assistant" for Groq.
+    return [
+        {"role": "assistant" if r[0] == "model" else r[0], "content": r[1]}
+        for r in reversed(rows)
+    ]
 
 
 def clear_history(user_id: int):
@@ -90,7 +90,7 @@ def get_last_assistant_message(user_id: int) -> str | None:
     with sqlite3.connect(DB_PATH) as conn:
         cursor = conn.execute(
             """SELECT content FROM messages
-               WHERE user_id = ? AND role = 'model'
+               WHERE user_id = ? AND role IN ('assistant', 'model')
                ORDER BY timestamp DESC
                LIMIT 1""",
             (user_id,),
@@ -101,20 +101,13 @@ def get_last_assistant_message(user_id: int) -> str | None:
 
 # --- Helpers ---
 
-async def ask_gemini(user_id: int) -> str:
-    history = get_history(user_id)
-    contents = [
-        genai_types.Content(
-            role=msg["role"],
-            parts=[genai_types.Part(text=msg["content"])],
-        )
-        for msg in history
-    ]
-    response = await gemini_client.aio.models.generate_content(
-        model=GEMINI_MODEL,
-        contents=contents,
+async def ask_llm(user_id: int) -> str:
+    messages = get_history(user_id)
+    response = await groq_client.chat.completions.create(
+        model=CHAT_MODEL,
+        messages=messages,
     )
-    return response.text or ""
+    return response.choices[0].message.content or ""
 
 
 async def transcribe_voice(file_id: str, context: ContextTypes.DEFAULT_TYPE) -> str:
@@ -174,8 +167,9 @@ async def reply_long(update: Update, text: str):
 
 async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
-        "Привет! Я ИИ-ассистент на базе Gemini 3.5 Flash.\n\n"
-        "Напиши мне что-нибудь или отправь голосовое сообщение.\n\n"
+        "Привет! Я ИИ-ассистент на базе Llama 3.3 70B (Groq).\n\n"
+        "Напиши мне что-нибудь или отправь голосовое сообщение.\n"
+        "Триггер «голос» или «гс» — озвучу предыдущий ответ.\n\n"
         "/start — это сообщение\n"
         "/clear — очистить историю диалога"
     )
@@ -209,10 +203,10 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     try:
         save_message(user_id, "user", user_message)
-        reply = await ask_gemini(user_id)
+        reply = await ask_llm(user_id)
         if not reply.strip():
             reply = "Пустой ответ от модели. Попробуй переформулировать."
-        save_message(user_id, "model", reply)
+        save_message(user_id, "assistant", reply)
         await reply_long(update, reply)
     except Exception as e:
         logger.error("handle_text error: %s", e)
@@ -235,10 +229,10 @@ async def handle_voice(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await context.bot.send_chat_action(chat_id=update.effective_chat.id, action="typing")
 
         save_message(user_id, "user", transcript)
-        reply = await ask_gemini(user_id)
+        reply = await ask_llm(user_id)
         if not reply.strip():
             reply = "Пустой ответ от модели. Попробуй переформулировать."
-        save_message(user_id, "model", reply)
+        save_message(user_id, "assistant", reply)
         await reply_long(update, reply)
 
         try:
